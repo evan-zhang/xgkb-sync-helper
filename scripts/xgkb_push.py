@@ -166,12 +166,12 @@ def push_file(file_path: str):
 
     remote_root = proj_cfg.get("remoteRoot", DEFAULT_REMOTE_ROOT)
 
-    # 计算知识库目标路径
+    # 计算知识库目标路径：remoteRoot/项目目录名/相对路径
     if proj_root:
+        project_name = proj_root.name  # .xgkb.json 所在目录名，如 TPR-20260618-001
         rel_path = path.relative_to(proj_root)
-        # remoteRoot/dir1/dir2/file.md
         rel_parts = str(rel_path).replace("\\", "/")
-        full_remote_path = f"{remote_root}/{rel_parts}"
+        full_remote_path = f"{remote_root}/{project_name}/{rel_parts}"
     else:
         full_remote_path = f"{remote_root}/{path.name}"
 

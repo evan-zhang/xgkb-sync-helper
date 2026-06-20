@@ -87,7 +87,7 @@ xgkb-push(file_path)
   2. 向上找最近的 .xgkb.json → remoteRoot + enabled
   3. enabled=false 或无配置 → 静默退出 (exit 0)
   4. 获取/缓存 projectId（个人空间）
-  5. 计算相对路径 → 拼接知识库目标路径
+  5. 计算远端路径：remoteRoot/项目目录名/文件相对路径
   6. 读文件内容
   7. 调 uploadContent API（幂等：存在则覆盖，不存在则新建）
   8. 成功 → exit 0

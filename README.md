@@ -88,11 +88,12 @@ python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_push.py /path/to/file.m
 
 ```
 本地：/projects/TPR-20260618-001/01-discovery/DISCOVERY.md
+              ^^^^^^^^^^^^^^^^^ .xgkb.json 在这层
 配置：remoteRoot = "TPR-Framework"
-知识库：TPR-Framework/01-discovery/DISCOVERY.md
+知识库：TPR-Framework/TPR-20260618-001/01-discovery/DISCOVERY.md
 ```
 
-相对路径基于 `.xgkb.json` 所在目录计算。
+`.xgkb.json` 所在目录名自动作为知识库中的项目目录名，多个项目不会混淆。
 
 ## 在 Skill 中集成
 

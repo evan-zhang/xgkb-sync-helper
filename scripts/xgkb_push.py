@@ -83,7 +83,7 @@ def api_call(server_url: str, app_key: str, path: str, method: str = "GET", body
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     # 显式编码 header 值为 ASCII（appKey 应为纯 ASCII）
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         raw = resp.read().decode("utf-8")
         result = json.loads(raw)
         if result.get("resultCode") != 1:

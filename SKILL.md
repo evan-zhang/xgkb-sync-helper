@@ -57,8 +57,14 @@ version: "0.1.0"
 # 同步单个文件
 python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_push.py /path/to/file.md
 
+# 批量同步整个目录（递归）
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_dir.py /path/to/directory
+
+# 批量同步，自定义间隔（默认3秒）
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_dir.py /path/to/directory --interval 5
+
 # 从 stdin 读取内容
-echo "# content" | python3 ~/.openclaw/skills/xgkb-push-helper/scripts/xgkb_push.py --stdin --name "note.md" --folder "TPR-Framework/notes"
+echo "# content" | python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_push.py --stdin --name "note.md" --folder "TPR-Framework/notes"
 ```
 
 ### Python 模块

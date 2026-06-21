@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from xgkb_push import push_file, find_project_config, load_global_config, DEFAULT_REMOTE_ROOT
+from xgkb_push import push_file, find_project_config, load_agent_config, DEFAULT_REMOTE_ROOT
 
 SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".html", ".htm", ".csv", ".xml"}
 
@@ -64,9 +64,9 @@ def main():
         sys.exit(1)
 
     # 检查配置
-    global_cfg = load_global_config()
+    global_cfg = load_agent_config()
     if not global_cfg.get("appKey"):
-        print("[xgkb-sync-dir] ❌ 未配置 appKey（~/.openclaw/xgkb.json），无法同步", file=sys.stderr)
+        print("[xgkb-sync-dir] ❌ 未配置 appKey（Agent workspace .xgkb.json），无法同步", file=sys.stderr)
         sys.exit(1)
 
     # 扫描文件

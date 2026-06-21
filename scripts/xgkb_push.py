@@ -20,10 +20,32 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+# === Agent Workspace 定位 ===
+
+def get_workspace() -> Path:
+    """定位当前 Agent 的 workspace 目录。
+    优先级：环境变量 OPENCLAW_WORKSPACE > 向上查找 AGENTS.md > 兜底 ~/.openclaw
+    """
+    # 1. 环境变量（最可靠，Agent exec 时由 OpenClaw 注入或 Skill 显式传入）
+    ws = os.environ.get("OPENCLAW_WORKSPACE")
+    if ws:
+        return Path(ws)
+
+    # 2. 从脚本所在位置向上查找 Agent workspace（含 AGENTS.md 或 SOUL.md）
+    current = Path(__file__).resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / "AGENTS.md").exists() or (parent / "SOUL.md").exists():
+            return parent
+
+    # 3. 兜底（不应到达，但避免崩溃）
+    return Path.home() / ".openclaw"
+
+WORKSPACE = get_workspace()
+
 # === 配置查找 ===
 
-GLOBAL_CONFIG_PATH = Path.home() / ".openclaw" / "xgkb.json"
-RETRY_LOG_PATH = Path.home() / ".openclaw" / "xgkb-retry.jsonl"
+AGENT_CONFIG_PATH = WORKSPACE / ".xgkb.json"         # Agent 级配置（appKey + serverUrl）
+RETRY_LOG_PATH = WORKSPACE / ".xgkb-retry.jsonl"      # Agent 级重试队列
 DEFAULT_SERVER_URL = "https://sg-al-cwork-web.mediportal.com.cn/open-api/"
 DEFAULT_REMOTE_ROOT = "OpenClaw"
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
@@ -45,12 +67,12 @@ def find_project_config(start_path: Path) -> dict | None:
     return None, None
 
 
-def load_global_config() -> dict:
-    """加载全局配置"""
+def load_agent_config() -> dict:
+    """加载 Agent 级配置（appKey + serverUrl）"""
     config = {}
-    if GLOBAL_CONFIG_PATH.exists():
+    if AGENT_CONFIG_PATH.exists():
         try:
-            with open(GLOBAL_CONFIG_PATH) as f:
+            with open(AGENT_CONFIG_PATH) as f:
                 config = json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -62,6 +84,10 @@ def load_global_config() -> dict:
         config["serverUrl"] = os.environ.get("XGKB_SERVER_URL", DEFAULT_SERVER_URL)
 
     return config
+
+# 兼容别名，避免大量改动
+def load_global_config() -> dict:
+    return load_agent_config()
 
 
 # === API 调用 ===

@@ -18,18 +18,33 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-GLOBAL_CONFIG_PATH = Path.home() / ".openclaw" / "xgkb.json"
-CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
 DEFAULT_SERVER_URL = "https://sg-al-cwork-web.mediportal.com.cn/open-api/"
+CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
 VERSION_REMARK = "xgkb-upload-file.py"
+
+# === Agent Workspace 定位 ===
+
+def get_workspace() -> Path:
+    """定位当前 Agent 的 workspace 目录。"""
+    ws = os.environ.get("OPENCLAW_WORKSPACE")
+    if ws:
+        return Path(ws)
+    current = Path(__file__).resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / "AGENTS.md").exists() or (parent / "SOUL.md").exists():
+            return parent
+    return Path.home() / ".openclaw"
+
+WORKSPACE = get_workspace()
+AGENT_CONFIG_PATH = WORKSPACE / ".xgkb.json"
 
 _project_id_cache = None
 
 
 def load_config():
     config = {}
-    if GLOBAL_CONFIG_PATH.exists():
-        with open(GLOBAL_CONFIG_PATH) as f:
+    if AGENT_CONFIG_PATH.exists():
+        with open(AGENT_CONFIG_PATH) as f:
             config = json.load(f)
     if not config.get("appKey"):
         config["appKey"] = os.environ.get("XGKB_APPKEY", "")

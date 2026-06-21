@@ -6,14 +6,16 @@ xgkb_retry.py — 消费重试队列，补推失败的同步
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
-RETRY_LOG_PATH = Path.home() / ".openclaw" / "xgkb-retry.jsonl"
-MAX_RETRIES = 3
-
 sys.path.insert(0, str(Path(__file__).parent))
-from xgkb_push import load_global_config, get_project_id, upload_content, DEFAULT_SERVER_URL
+from xgkb_push import load_agent_config, get_project_id, upload_content, DEFAULT_SERVER_URL, get_workspace
+
+WORKSPACE = get_workspace()
+RETRY_LOG_PATH = WORKSPACE / ".xgkb-retry.jsonl"
+MAX_RETRIES = 3
 
 
 def main():
@@ -41,7 +43,7 @@ def main():
         RETRY_LOG_PATH.unlink()
         return
 
-    global_cfg = load_global_config()
+    global_cfg = load_agent_config()
     app_key = global_cfg.get("appKey", "")
     server_url = global_cfg.get("serverUrl", DEFAULT_SERVER_URL)
 

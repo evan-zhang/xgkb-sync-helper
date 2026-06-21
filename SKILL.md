@@ -111,7 +111,5 @@ xgkb-push(file_path)
 
 ## 限制
 
-- 仅支持文本文件（.md / .txt / .json / .yaml 等）
 - 单文件大小限制 10MB
-- 不支持二进制文件（图片、PDF 等）—— 用 doc-viewer skill 的路径 C
 - 不支持删除同步 —— 知识库文件管理在玄关网页端操作

@@ -134,18 +134,19 @@ python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_retry.py
 | 接口 | 用途 |
 |------|------|
 | `GET /document-database/project/personal/getProjectId` | 获取个人空间 ID |
-| `POST /document-database/file/uploadContent` | 上传/更新文件（幂等） |
+| `POST /document-database/file/uploadContent` | 上传/更新文本文件（幂等） |
+| `POST /cwork-file/uploadWholeFile` | 上传二进制物理文件 |
+| `POST /document-database/file/saveFileByPath` | 绑定文件到知识库目录（nameConflictStrategy=1 幂等） |
 
-已验证（2026-06-19）：
+已验证（2026-06-21）：
 - ✅ `uploadContent` 幂等 — 同名文件覆盖，不产生副本
+- ✅ `saveFileByPath(nameConflictStrategy=1)` 幂等 — 二进制文件同名覆盖
 - ✅ 上传后实时可读 — 无延迟
 - ✅ 内容更新即时生效
 
 ## 限制
 
-- 仅支持文本文件（.md / .txt / .json / .yaml 等）
 - 单文件大小限制 10MB
-- 不支持二进制文件（图片、PDF）— 用 [doc-viewer](https://github.com/evan-zhang/agent-factory/tree/master/projects/2605101/doc-viewer) skill
 - 不支持删除同步 — 知识库文件管理在玄关网页端操作
 
 ## 项目结构

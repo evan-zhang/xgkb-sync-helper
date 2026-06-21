@@ -12,6 +12,7 @@ xgkb_push.py — 将单个文件同步到玄关个人知识库
 """
 
 import json
+import mimetypes
 import os
 import sys
 import time
@@ -103,7 +104,7 @@ def get_project_id(server_url: str, app_key: str) -> str:
 
 def upload_content(server_url: str, app_key: str, project_id: str,
                    folder_name: str, file_name: str, content: str, suffix: str) -> dict:
-    """上传/更新文件（幂等：同名覆盖）"""
+    """上传/更新文本文件（幂等：同名覆盖）"""
     return api_call(server_url, app_key, "/document-database/file/uploadContent", method="POST", body={
         "projectId": project_id,
         "folderName": folder_name,
@@ -111,6 +112,49 @@ def upload_content(server_url: str, app_key: str, project_id: str,
         "content": content,
         "suffix": suffix,
     })
+
+
+def upload_binary(server_url: str, app_key: str, project_id: str,
+                  folder_name: str, file_name: str, file_path: str, suffix: str) -> dict:
+    """上传/更新二进制文件（幂等：nameConflictStrategy=1）"""
+    # Step 1: 物理文件上传
+    url = server_url.rstrip("/") + "/cwork-file/uploadWholeFile"
+    boundary = f"----xgkb{int(time.time()*1000)}"
+    with open(file_path, "rb") as f:
+        file_data = f.read()
+    
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{file_name}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "appKey": app_key,
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    })
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+        if result.get("resultCode") != 1:
+            raise RuntimeError(f"uploadWholeFile error: {result.get('resultMsg')}")
+        resource_id = str(result["data"])
+    
+    # Step 2: saveFileByPath with nameConflictStrategy=1
+    file_size = os.path.getsize(file_path)
+    return api_call(server_url, app_key, "/document-database/file/saveFileByPath", method="POST", body={
+        "projectId": project_id,
+        "path": folder_name,
+        "name": file_name,
+        "fileType": "file",
+        "resourceId": resource_id,
+        "suffix": suffix,
+        "size": file_size,
+        "nameConflictStrategy": 1,
+    })
+
+
+# 文本文件扩展名
+TEXT_EXTENSIONS = {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".html", ".htm", ".csv", ".xml", ".log", ".py", ".js", ".ts", ".sh", ".sql"}
 
 
 # === 重试队列 ===
@@ -143,13 +187,6 @@ def push_file(file_path: str):
         print(f"[xgkb-push] 文件超过 10MB 限制: {file_path}", file=sys.stderr)
         return
 
-    # 读文件内容
-    try:
-        content = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        print(f"[xgkb-push] 非文本文件，跳过: {file_path}", file=sys.stderr)
-        return
-
     # 加载配置
     global_cfg = load_global_config()
     app_key = global_cfg.get("appKey", "")
@@ -166,8 +203,7 @@ def push_file(file_path: str):
 
     remote_root = proj_cfg.get("remoteRoot", DEFAULT_REMOTE_ROOT)
 
-    # 计算知识库目标路径：remoteRoot/项目目录名/相对路径
-    # proj_root 是 .xgkb.json 所在目录（即 projects/），文件相对路径已包含项目目录名
+    # 计算知识库目标路径
     if proj_root:
         rel_path = path.relative_to(proj_root)
         rel_parts = str(rel_path).replace("\\", "/")
@@ -181,10 +217,19 @@ def push_file(file_path: str):
     file_name = parts[-1]
     suffix = file_name.rsplit(".", 1)[-1] if "." in file_name else "txt"
 
-    # 上传
+    # 判断文件类型：文本走 uploadContent，二进制走 uploadWholeFile + saveFileByPath
+    ext = path.suffix.lower()
+    is_text = ext in TEXT_EXTENSIONS
+
     try:
         project_id = get_project_id(server_url, app_key)
-        result = upload_content(server_url, app_key, project_id, folder_name, file_name, content, suffix)
+        
+        if is_text:
+            content = path.read_text(encoding="utf-8")
+            result = upload_content(server_url, app_key, project_id, folder_name, file_name, content, suffix)
+        else:
+            result = upload_binary(server_url, app_key, project_id, folder_name, file_name, str(path), suffix)
+        
         file_id = result.get("fileId", "") if isinstance(result, dict) else str(result)
         print(f"[xgkb-push] ✅ {file_name} → {folder_name}/ (fileId={file_id})")
     except Exception as e:

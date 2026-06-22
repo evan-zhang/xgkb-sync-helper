@@ -243,16 +243,16 @@ def write_retry(file_path: str, folder_name: str, file_name: str, error: str,
 
 # === 主逻辑 ===
 
-def push_file(file_path: str):
-    """同步单个文件到知识库"""
+def push_file(file_path: str) -> int:
+    """同步单个文件到知识库。返回退出码：0=成功/应跳过/失败已入重试队列，1=配置错误。"""
     path = Path(file_path).resolve()
     if not path.exists():
         print(f"[xgkb-push] 文件不存在: {file_path}", file=sys.stderr)
-        return
+        return 1
 
     if path.stat().st_size > MAX_FILE_SIZE:
-        print(f"[xgkb-push] 文件超过 10MB 限制: {file_path}", file=sys.stderr)
-        return
+        print(f"[xgkb-push] 文件超过 10MB 限制，请使用 xgkb_upload_file.py: {file_path}", file=sys.stderr)
+        return 1
 
     # 加载配置
     global_cfg = load_global_config()
@@ -261,12 +261,12 @@ def push_file(file_path: str):
 
     if not app_key:
         print("[xgkb-push] 未配置 appKey，跳过", file=sys.stderr)
-        return
+        return 1
 
     proj_cfg, proj_root = find_project_config(path)
     if proj_cfg is None or not proj_cfg.get("enabled", False):
         print("[xgkb-push] 项目未启用同步，跳过")
-        return
+        return 0
 
     remote_root = proj_cfg.get("remoteRoot", DEFAULT_REMOTE_ROOT)
 
@@ -300,21 +300,23 @@ def push_file(file_path: str):
         
         file_id = result.get("fileId", "") if isinstance(result, dict) else str(result)
         print(f"[xgkb-push] ✅ {file_name} → {project_name}/{folder_name}/ (fileId={file_id})")
+        return 0
     except Exception as e:
         error_msg = str(e)
         print(f"[xgkb-push] ❌ 同步失败: {error_msg}", file=sys.stderr)
         write_retry(str(path), folder_name, file_name, error_msg, project_id=proj_cfg.get("projectId", ""), project_name=proj_cfg.get("projectName", ""))
+        return 0  # 失败已入重试队列，不阻断主流程
 
 
-def push_stdin(name: str, folder: str, content: str):
-    """从 stdin 读取内容并上传"""
+def push_stdin(name: str, folder: str, content: str) -> int:
+    """从 stdin 读取内容并上传。返回退出码。"""
     global_cfg = load_global_config()
     app_key = global_cfg.get("appKey", "")
     server_url = global_cfg.get("serverUrl", DEFAULT_SERVER_URL)
 
     if not app_key:
         print("[xgkb-push] 未配置 appKey，跳过", file=sys.stderr)
-        return
+        return 1
 
     suffix = name.rsplit(".", 1)[-1] if "." in name else "txt"
 
@@ -332,10 +334,12 @@ def push_stdin(name: str, folder: str, content: str):
         result = upload_content(server_url, app_key, project_id, folder, name, content, suffix)
         file_id = result.get("fileId", "") if isinstance(result, dict) else str(result)
         print(f"[xgkb-push] ✅ {name} → {folder}/ (fileId={file_id})")
+        return 0
     except Exception as e:
         error_msg = str(e)
         print(f"[xgkb-push] ❌ 同步失败: {error_msg}", file=sys.stderr)
         write_retry(f"<stdin:{name}>", folder, name, error_msg)
+        return 0
 
 
 def main():
@@ -361,9 +365,9 @@ def main():
             print("[xgkb-push] --stdin 模式需要 --name 参数", file=sys.stderr)
             sys.exit(1)
         content = sys.stdin.read()
-        push_stdin(name, folder, content)
+        sys.exit(push_stdin(name, folder, content))
     else:
-        push_file(sys.argv[1])
+        sys.exit(push_file(sys.argv[1]))
 
 
 if __name__ == "__main__":

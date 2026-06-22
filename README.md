@@ -201,8 +201,8 @@ python3 <project>/scripts/xgkb_push.py <文件路径>
 ### 方式 B：Python import
 
 ```python
-import sys
-sys.path.insert(0, "<project>/scripts")
+import sys, os
+sys.path.insert(0, os.path.expanduser("~/.openclaw/gateways/life/state/workspace-life/projects/TPR-20260621-001-xgkb-sync-helper/scripts"))
 from xgkb_push import push_file
 
 push_file("/path/to/file.md")

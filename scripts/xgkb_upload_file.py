@@ -88,14 +88,31 @@ def api_call(server_url, app_key, path, method="GET", body=None, timeout=60):
         return result.get("data")
 
 
-def get_project_id(server_url, app_key):
-    global _project_id_cache
-    if _project_id_cache:
-        return _project_id_cache
+def get_personal_project_id(server_url, app_key):
+    """获取个人知识库 projectId"""
     pid = api_call(server_url, app_key, "/document-database/project/personal/getProjectId")
-    pid = str(pid)
-    _project_id_cache = pid
-    return pid
+    return str(pid)
+
+
+def list_projects(server_url, app_key):
+    """列出所有有权限的知识库空间"""
+    data = api_call(server_url, app_key, "/document-database/project/list")
+    return data if isinstance(data, list) else []
+
+
+def resolve_project_id(server_url, app_key, proj_cfg):
+    """根据配置解析目标 projectId"""
+    explicit_id = proj_cfg.get("projectId", "").strip() if proj_cfg else ""
+    if explicit_id:
+        return explicit_id
+    project_name = proj_cfg.get("projectName", "").strip() if proj_cfg else ""
+    if project_name:
+        projects = list_projects(server_url, app_key)
+        for p in projects:
+            if p.get("name") == project_name:
+                return str(p["id"])
+        raise RuntimeError(f"未找到名为「{project_name}」的知识库空间")
+    return get_personal_project_id(server_url, app_key)
 
 
 def md5_bytes(data):
@@ -140,7 +157,7 @@ def upload_file(file_path):
 
     print(f"[xgkb-upload] 目标: {folder_name}/{remote_file_name}")
 
-    project_id = get_project_id(server_url, app_key)
+    project_id = resolve_project_id(server_url, app_key, proj_cfg)
     print(f"[xgkb-upload] projectId: {project_id}")
 
     # Step 1: Split into chunks and upload

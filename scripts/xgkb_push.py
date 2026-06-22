@@ -118,14 +118,50 @@ def api_call(server_url: str, app_key: str, path: str, method: str = "GET", body
         return result.get("data")
 
 
-def get_project_id(server_url: str, app_key: str) -> str:
-    global _project_id_cache
-    if _project_id_cache:
-        return _project_id_cache
+def get_personal_project_id(server_url: str, app_key: str) -> str:
+    """获取个人知识库 projectId"""
     pid = api_call(server_url, app_key, "/document-database/project/personal/getProjectId")
-    pid = str(pid)
-    _project_id_cache = pid
-    return pid
+    return str(pid)
+
+
+_project_id_cache = {}
+
+
+def list_projects(server_url: str, app_key: str) -> list[dict]:
+    """列出当前用户有权限的所有知识库空间"""
+    data = api_call(server_url, app_key, "/document-database/project/list")
+    return data if isinstance(data, list) else []
+
+
+def resolve_project_id(server_url: str, app_key: str, proj_cfg: dict) -> str:
+    """根据项目配置解析目标知识库 projectId。
+
+    优先级：
+    1. proj_cfg.projectId — 直接指定 ID
+    2. proj_cfg.projectName — 按名称查找
+    3. 默认 — 个人知识库
+    """
+    # 显式指定 projectId
+    explicit_id = proj_cfg.get("projectId", "").strip()
+    if explicit_id:
+        return explicit_id
+
+    # 按名称查找
+    project_name = proj_cfg.get("projectName", "").strip()
+    if project_name:
+        cache_key = f"name:{project_name}"
+        if cache_key in _project_id_cache:
+            return _project_id_cache[cache_key]
+        projects = list_projects(server_url, app_key)
+        for p in projects:
+            if p.get("name") == project_name:
+                pid = str(p["id"])
+                _project_id_cache[cache_key] = pid
+                return pid
+        raise RuntimeError(f"未找到名为「{project_name}」的知识库空间")
+
+    # 默认个人空间
+    return get_personal_project_id(server_url, app_key)
 
 
 def upload_content(server_url: str, app_key: str, project_id: str,
@@ -185,7 +221,8 @@ TEXT_EXTENSIONS = {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".html"
 
 # === 重试队列 ===
 
-def write_retry(file_path: str, folder_name: str, file_name: str, error: str):
+def write_retry(file_path: str, folder_name: str, file_name: str, error: str,
+                project_id: str = "", project_name: str = ""):
     """写入重试队列"""
     RETRY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -196,6 +233,10 @@ def write_retry(file_path: str, folder_name: str, file_name: str, error: str):
         "error": error,
         "retries": 0,
     }
+    if project_id:
+        entry["project_id"] = project_id
+    if project_name:
+        entry["project_name"] = project_name
     with open(RETRY_LOG_PATH, "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -248,7 +289,8 @@ def push_file(file_path: str):
     is_text = ext in TEXT_EXTENSIONS
 
     try:
-        project_id = get_project_id(server_url, app_key)
+        project_id = resolve_project_id(server_url, app_key, proj_cfg)
+        project_name = proj_cfg.get("projectName", "") or proj_cfg.get("projectId", "") or "个人知识库"
         
         if is_text:
             content = path.read_text(encoding="utf-8")
@@ -257,11 +299,11 @@ def push_file(file_path: str):
             result = upload_binary(server_url, app_key, project_id, folder_name, file_name, str(path), suffix)
         
         file_id = result.get("fileId", "") if isinstance(result, dict) else str(result)
-        print(f"[xgkb-push] ✅ {file_name} → {folder_name}/ (fileId={file_id})")
+        print(f"[xgkb-push] ✅ {file_name} → {project_name}/{folder_name}/ (fileId={file_id})")
     except Exception as e:
         error_msg = str(e)
         print(f"[xgkb-push] ❌ 同步失败: {error_msg}", file=sys.stderr)
-        write_retry(str(path), folder_name, file_name, error_msg)
+        write_retry(str(path), folder_name, file_name, error_msg, project_id=proj_cfg.get("projectId", ""), project_name=proj_cfg.get("projectName", ""))
 
 
 def push_stdin(name: str, folder: str, content: str):
@@ -277,7 +319,16 @@ def push_stdin(name: str, folder: str, content: str):
     suffix = name.rsplit(".", 1)[-1] if "." in name else "txt"
 
     try:
-        project_id = get_project_id(server_url, app_key)
+        # stdin 模式默认个人空间，也可通过环境变量指定
+        proj_cfg = {}
+        proj_id = os.environ.get("XGKB_PROJECT_ID", "").strip()
+        proj_name = os.environ.get("XGKB_PROJECT_NAME", "").strip()
+        if proj_id:
+            proj_cfg["projectId"] = proj_id
+        elif proj_name:
+            proj_cfg["projectName"] = proj_name
+
+        project_id = resolve_project_id(server_url, app_key, proj_cfg)
         result = upload_content(server_url, app_key, project_id, folder, name, content, suffix)
         file_id = result.get("fileId", "") if isinstance(result, dict) else str(result)
         print(f"[xgkb-push] ✅ {name} → {folder}/ (fileId={file_id})")

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from xgkb_push import load_agent_config, get_project_id, upload_content, DEFAULT_SERVER_URL, get_workspace
+from xgkb_push import load_agent_config, resolve_project_id, upload_content, DEFAULT_SERVER_URL, get_workspace
 
 WORKSPACE = get_workspace()
 RETRY_LOG_PATH = WORKSPACE / ".xgkb-retry.jsonl"
@@ -80,8 +80,19 @@ def main():
 
         suffix = file_name.rsplit(".", 1)[-1] if "." in file_name else "txt"
 
+        # 解析目标空间（优先用重试记录中保存的，其次环境变量）
+        proj_cfg = {}
+        if entry.get("project_id"):
+            proj_cfg["projectId"] = entry["project_id"]
+        elif entry.get("project_name"):
+            proj_cfg["projectName"] = entry["project_name"]
+        elif os.environ.get("XGKB_PROJECT_ID"):
+            proj_cfg["projectId"] = os.environ["XGKB_PROJECT_ID"]
+        elif os.environ.get("XGKB_PROJECT_NAME"):
+            proj_cfg["projectName"] = os.environ["XGKB_PROJECT_NAME"]
+
         try:
-            project_id = get_project_id(server_url, app_key)
+            project_id = resolve_project_id(server_url, app_key, proj_cfg)
             upload_content(server_url, app_key, project_id, folder_name, file_name, content, suffix)
             print(f"[xgkb-retry] ✅ 补推成功: {file_name} → {folder_name}/")
         except Exception as e:

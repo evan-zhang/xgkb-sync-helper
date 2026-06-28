@@ -22,33 +22,51 @@ from pathlib import Path
 
 # === Agent Workspace 定位 ===
 
-def get_workspace() -> Path:
+def get_workspace(file_path: str | Path | None = None) -> Path:
     """定位当前 Agent 的 workspace 目录。
-    优先级：环境变量 OPENCLAW_WORKSPACE > 向上查找 AGENTS.md > 兜底 ~/.openclaw
+    优先级：环境变量 OPENCLAW_WORKSPACE > 从被处理文件位置向上查找含 .xgkb.json（且有 appKey）的目录 > 兜底 ~/.openclaw
     """
-    # 1. 环境变量（最可靠，Agent exec 时由 OpenClaw 注入或 Skill 显式传入）
+    # 1. 环境变量
     ws = os.environ.get("OPENCLAW_WORKSPACE")
     if ws:
         return Path(ws)
 
-    # 2. 从脚本所在位置向上查找 Agent workspace（含 AGENTS.md 或 SOUL.md）
-    current = Path(__file__).resolve()
-    for parent in [current] + list(current.parents):
-        if (parent / "AGENTS.md").exists() or (parent / "SOUL.md").exists():
-            return parent
+    # 2. 从被处理文件位置向上查找含 .xgkb.json 的目录
+    # .xgkb.json 有两种角色：
+    #   - workspace 级（含 appKey + serverUrl）→ 这就是我们要找的
+    #   - 项目级（含 enabled + remoteRoot）→ 子目录配置，跳过
+    if file_path is not None:
+        current = Path(file_path).resolve()
+        if current.is_file():
+            current = current.parent
+        for parent in [current] + list(current.parents):
+            cfg_path = parent / ".xgkb.json"
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path) as f:
+                        cfg = json.load(f)
+                    if cfg.get("appKey"):
+                        return parent
+                except (json.JSONDecodeError, OSError):
+                    pass
 
     # 3. 兜底（不应到达，但避免崩溃）
     return Path.home() / ".openclaw"
 
-WORKSPACE = get_workspace()
 
-# === 配置查找 ===
-
-AGENT_CONFIG_PATH = WORKSPACE / ".xgkb.json"         # Agent 级配置（appKey + serverUrl）
-RETRY_LOG_PATH = WORKSPACE / ".xgkb-retry.jsonl"      # Agent 级重试队列
 DEFAULT_SERVER_URL = "https://sg-al-cwork-web.mediportal.com.cn/open-api/"
 DEFAULT_REMOTE_ROOT = "OpenClaw"
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+def get_agent_config_path(file_path: str | Path | None = None) -> Path:
+    """获取 Agent 级配置文件路径"""
+    return get_workspace(file_path) / ".xgkb.json"
+
+
+def get_retry_log_path(file_path: str | Path | None = None) -> Path:
+    """获取 Agent 级重试队列路径"""
+    return get_workspace(file_path) / ".xgkb-retry.jsonl"
 
 
 def find_project_config(start_path: Path) -> dict | None:
@@ -67,12 +85,13 @@ def find_project_config(start_path: Path) -> dict | None:
     return None, None
 
 
-def load_agent_config() -> dict:
-    """加载 Agent 级配置（appKey + serverUrl）"""
+def load_agent_config(file_path: str | Path | None = None) -> dict:
+    """加载 Agent 级配置（appKey + serverUrl），从被处理文件位置定位 workspace"""
     config = {}
-    if AGENT_CONFIG_PATH.exists():
+    agent_config_path = get_agent_config_path(file_path)
+    if agent_config_path.exists():
         try:
-            with open(AGENT_CONFIG_PATH) as f:
+            with open(agent_config_path) as f:
                 config = json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -85,9 +104,9 @@ def load_agent_config() -> dict:
 
     return config
 
-# 兼容别名，避免大量改动
-def load_global_config() -> dict:
-    return load_agent_config()
+# 兼容别名
+def load_global_config(file_path: str | Path | None = None) -> dict:
+    return load_agent_config(file_path)
 
 
 # === API 调用 ===
@@ -224,7 +243,8 @@ TEXT_EXTENSIONS = {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".html"
 def write_retry(file_path: str, folder_name: str, file_name: str, error: str,
                 project_id: str = "", project_name: str = ""):
     """写入重试队列"""
-    RETRY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    retry_log_path = get_retry_log_path(file_path)
+    retry_log_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "ts": int(time.time()),
         "file_path": file_path,
@@ -237,36 +257,36 @@ def write_retry(file_path: str, folder_name: str, file_name: str, error: str,
         entry["project_id"] = project_id
     if project_name:
         entry["project_name"] = project_name
-    with open(RETRY_LOG_PATH, "a") as f:
+    with open(retry_log_path, "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 # === 主逻辑 ===
 
-def push_file(file_path: str) -> int:
-    """同步单个文件到知识库。返回退出码：0=成功/应跳过/失败已入重试队列，1=配置错误。"""
+def push_file(file_path: str):
+    """同步单个文件到知识库"""
     path = Path(file_path).resolve()
     if not path.exists():
         print(f"[xgkb-push] 文件不存在: {file_path}", file=sys.stderr)
-        return 1
+        return
 
     if path.stat().st_size > MAX_FILE_SIZE:
-        print(f"[xgkb-push] 文件超过 10MB 限制，请使用 xgkb_upload_file.py: {file_path}", file=sys.stderr)
-        return 1
+        print(f"[xgkb-push] 文件超过 10MB 限制: {file_path}", file=sys.stderr)
+        return
 
-    # 加载配置
-    global_cfg = load_global_config()
+    # 加载配置（从被处理文件位置定位 workspace）
+    global_cfg = load_global_config(file_path)
     app_key = global_cfg.get("appKey", "")
     server_url = global_cfg.get("serverUrl", DEFAULT_SERVER_URL)
 
     if not app_key:
         print("[xgkb-push] 未配置 appKey，跳过", file=sys.stderr)
-        return 1
+        return
 
     proj_cfg, proj_root = find_project_config(path)
     if proj_cfg is None or not proj_cfg.get("enabled", False):
         print("[xgkb-push] 项目未启用同步，跳过")
-        return 0
+        return
 
     remote_root = proj_cfg.get("remoteRoot", DEFAULT_REMOTE_ROOT)
 
@@ -300,23 +320,21 @@ def push_file(file_path: str) -> int:
         
         file_id = result.get("fileId", "") if isinstance(result, dict) else str(result)
         print(f"[xgkb-push] ✅ {file_name} → {project_name}/{folder_name}/ (fileId={file_id})")
-        return 0
     except Exception as e:
         error_msg = str(e)
         print(f"[xgkb-push] ❌ 同步失败: {error_msg}", file=sys.stderr)
         write_retry(str(path), folder_name, file_name, error_msg, project_id=proj_cfg.get("projectId", ""), project_name=proj_cfg.get("projectName", ""))
-        return 0  # 失败已入重试队列，不阻断主流程
 
 
-def push_stdin(name: str, folder: str, content: str) -> int:
-    """从 stdin 读取内容并上传。返回退出码。"""
-    global_cfg = load_global_config()
+def push_stdin(name: str, folder: str, content: str):
+    """从 stdin 读取内容并上传"""
+    global_cfg = load_global_config(None)
     app_key = global_cfg.get("appKey", "")
     server_url = global_cfg.get("serverUrl", DEFAULT_SERVER_URL)
 
     if not app_key:
         print("[xgkb-push] 未配置 appKey，跳过", file=sys.stderr)
-        return 1
+        return
 
     suffix = name.rsplit(".", 1)[-1] if "." in name else "txt"
 
@@ -334,12 +352,10 @@ def push_stdin(name: str, folder: str, content: str) -> int:
         result = upload_content(server_url, app_key, project_id, folder, name, content, suffix)
         file_id = result.get("fileId", "") if isinstance(result, dict) else str(result)
         print(f"[xgkb-push] ✅ {name} → {folder}/ (fileId={file_id})")
-        return 0
     except Exception as e:
         error_msg = str(e)
         print(f"[xgkb-push] ❌ 同步失败: {error_msg}", file=sys.stderr)
         write_retry(f"<stdin:{name}>", folder, name, error_msg)
-        return 0
 
 
 def main():
@@ -365,9 +381,9 @@ def main():
             print("[xgkb-push] --stdin 模式需要 --name 参数", file=sys.stderr)
             sys.exit(1)
         content = sys.stdin.read()
-        sys.exit(push_stdin(name, folder, content))
+        push_stdin(name, folder, content)
     else:
-        sys.exit(push_file(sys.argv[1]))
+        push_file(sys.argv[1])
 
 
 if __name__ == "__main__":

@@ -2,7 +2,11 @@
 """
 xgkb_retry.py — 消费重试队列，补推失败的同步
 
-用法: python3 xgkb_retry.py
+用法:
+  python3 xgkb_retry.py <目录或文件路径>
+  python3 xgkb_retry.py /path/to/workspace
+
+从给定路径定位 workspace，找到 .xgkb-retry.jsonl 并补推。
 """
 
 import json
@@ -11,19 +15,24 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from xgkb_push import load_agent_config, resolve_project_id, upload_content, DEFAULT_SERVER_URL, get_workspace
+from xgkb_push import load_agent_config, resolve_project_id, upload_content, DEFAULT_SERVER_URL, get_retry_log_path
 
-WORKSPACE = get_workspace()
-RETRY_LOG_PATH = WORKSPACE / ".xgkb-retry.jsonl"
 MAX_RETRIES = 3
 
 
 def main():
-    if not RETRY_LOG_PATH.exists():
+    if len(sys.argv) < 2:
+        print("用法: python3 xgkb_retry.py <目录或文件路径>", file=sys.stderr)
+        sys.exit(1)
+
+    hint_path = sys.argv[1]
+    retry_log_path = get_retry_log_path(hint_path)
+
+    if not retry_log_path.exists():
         return
 
     # 读取所有待重试条目
-    with open(RETRY_LOG_PATH) as f:
+    with open(retry_log_path) as f:
         lines = f.readlines()
 
     if not lines:
@@ -40,10 +49,15 @@ def main():
             continue
 
     if not pending:
-        RETRY_LOG_PATH.unlink()
+        retry_log_path.unlink()
         return
 
-    global_cfg = load_agent_config()
+    # 从第一条重试记录的文件路径定位 workspace
+    first_file = pending[0].get("file_path", "") if pending else ""
+    if first_file:
+        global_cfg = load_agent_config(first_file)
+    else:
+        global_cfg = load_agent_config(hint_path)
     app_key = global_cfg.get("appKey", "")
     server_url = global_cfg.get("serverUrl", DEFAULT_SERVER_URL)
 
@@ -101,9 +115,9 @@ def main():
             still_failing.append(entry)
 
     # 重写重试队列
-    RETRY_LOG_PATH.unlink()
+    retry_log_path.unlink()
     if still_failing:
-        with open(RETRY_LOG_PATH, "a") as f:
+        with open(retry_log_path, "a") as f:
             for entry in still_failing:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         print(f"[xgkb-retry] {len(still_failing)} 条仍在重试队列")

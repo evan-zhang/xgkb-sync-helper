@@ -63,8 +63,8 @@ def main():
         print(f"[xgkb-sync-dir] ❌ 目录不存在: {dir_path}", file=sys.stderr)
         sys.exit(1)
 
-    # 检查配置
-    global_cfg = load_agent_config()
+    # 检查配置（从目录位置定位 workspace）
+    global_cfg = load_agent_config(dir_path)
     if not global_cfg.get("appKey"):
         print("[xgkb-sync-dir] ❌ 未配置 appKey（Agent workspace .xgkb.json），无法同步", file=sys.stderr)
         sys.exit(1)
@@ -95,19 +95,23 @@ def main():
         print(f"\n[{i+1}/{total}] {filepath}")
 
         # 第一次尝试
-        rc = push_file(str(filepath))
-        if rc == 0:
+        try:
+            push_file(str(filepath))
             success += 1
-        else:
-            # 第一次失败（配置错误等），重试一次
-            print(f"  ⚠️ 第一次失败，等待 5 秒后重试...")
+        except SystemExit:
+            pass
+        except Exception as e:
+            # 第一次失败，重试一次
+            print(f"  ⚠️ 第一次失败: {e}，等待 5 秒后重试...")
             time.sleep(5)
-            rc2 = push_file(str(filepath))
-            if rc2 == 0:
+            try:
+                push_file(str(filepath))
                 retry_success += 1
-            else:
-                print(f"  ❌ 重试也失败")
-                failed.append((str(filepath), "push_file returned non-zero"))
+            except SystemExit:
+                pass
+            except Exception as e2:
+                print(f"  ❌ 重试也失败: {e2}")
+                failed.append((str(filepath), str(e2)))
 
         # 间隔（最后一个不等）
         if i < total - 1 and args.interval > 0:

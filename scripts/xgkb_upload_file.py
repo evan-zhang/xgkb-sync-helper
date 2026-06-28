@@ -24,27 +24,42 @@ VERSION_REMARK = "xgkb-upload-file.py"
 
 # === Agent Workspace 定位 ===
 
-def get_workspace() -> Path:
-    """定位当前 Agent 的 workspace 目录。"""
+def get_workspace(file_path=None) -> Path:
+    """定位当前 Agent 的 workspace 目录。
+    优先级：环境变量 > 从被处理文件位置向上查找含 .xgkb.json（且有 appKey）的目录 > 兜底 ~/.openclaw
+    """
     ws = os.environ.get("OPENCLAW_WORKSPACE")
     if ws:
         return Path(ws)
-    current = Path(__file__).resolve()
-    for parent in [current] + list(current.parents):
-        if (parent / "AGENTS.md").exists() or (parent / "SOUL.md").exists():
-            return parent
+    if file_path is not None:
+        current = Path(file_path).resolve()
+        if current.is_file():
+            current = current.parent
+        for parent in [current] + list(current.parents):
+            cfg_path = parent / ".xgkb.json"
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path) as f:
+                        cfg = json.load(f)
+                    if cfg.get("appKey"):
+                        return parent
+                except (json.JSONDecodeError, OSError):
+                    pass
     return Path.home() / ".openclaw"
 
-WORKSPACE = get_workspace()
-AGENT_CONFIG_PATH = WORKSPACE / ".xgkb.json"
+
+def get_agent_config_path(file_path=None) -> Path:
+    return get_workspace(file_path) / ".xgkb.json"
+
 
 _project_id_cache = None
 
 
-def load_config():
+def load_config(file_path=None):
     config = {}
-    if AGENT_CONFIG_PATH.exists():
-        with open(AGENT_CONFIG_PATH) as f:
+    agent_config_path = get_agent_config_path(file_path)
+    if agent_config_path.exists():
+        with open(agent_config_path) as f:
             config = json.load(f)
     if not config.get("appKey"):
         config["appKey"] = os.environ.get("XGKB_APPKEY", "")
@@ -133,7 +148,7 @@ def upload_file(file_path):
     print(f"[xgkb-upload] {file_name}: {total_size:,} bytes, suffix={suffix}")
 
     # Config
-    global_cfg = load_config()
+    global_cfg = load_config(file_path)
     app_key = global_cfg["appKey"]
     server_url = global_cfg["serverUrl"]
 

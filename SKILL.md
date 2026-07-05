@@ -29,9 +29,19 @@ version: "2.1.1"
 
 - **幂等**：同名文件重复上传不创建副本，直接覆盖（保留原 fileId）
 - **全类型**：文本文件（.md/.txt/.json 等）和二进制文件（.pdf/.docx/.png 等）均支持
-- **增量**：本地状态缓存 `~/.openclaw/xgkb-state/<project>.json` 记录每个文件的 fileId、versionNumber、contentHash；push 时自动检测增删改
+- **增量**：本地 SQLite 状态缓存 `~/.openclaw/xgkb-state/<project-key>.db` 记录每个文件的 fileId、versionNumber、contentHash；push 时自动检测增删改
 - **零进程依赖**：不需要常驻服务，调一次跑一次
 - **失败安全**：网络失败写重试队列，不阻断主流程
+
+## 本地质量门禁
+
+改动后优先跑脚本，不靠人工手动检查：
+
+```bash
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_check.py
+```
+
+它会执行本地无网络检查：语法编译、回归测试、关键 CLI 冒烟检查、旧入口 import 兼容检查。
 
 ## 配置
 
@@ -86,7 +96,7 @@ python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_push.py \
 
 ### 全量双向同步（推荐）
 
-`xgkb_sync_full.py` 是 v2.0 新增的核心脚本：
+`xgkb_sync_full.py` 是 v2.1 的核心脚本：
 
 ```bash
 # push 模式：本地 → 云端（增删改同步，最常用）

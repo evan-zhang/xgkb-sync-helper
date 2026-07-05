@@ -19,8 +19,19 @@ design/
 README.md
 scripts/
 SKILL.md
+tests/
 VERSION
 ```
+
+## 本地质量门禁
+
+改动后先跑：
+
+```bash
+python3 scripts/xgkb_check.py
+```
+
+脚本会执行本地无网络检查：语法编译、回归测试、关键 CLI 冒烟检查、旧入口 import 兼容检查。
 
 ---
 > xgkb-explorer 自动生成 · 数据源：`SKILL.md` · 生成时间：2026-06-24T11:45:11

@@ -113,3 +113,4 @@ xgkb-push(file_path)
 
 - 单文件大小限制 10MB
 - 不支持删除同步 — 知识库文件管理在玄关网页端操作
+- **Python 版本：必须 3.10+**（脚本用了 PEP 604 `str | Path` 语法）。Debian 默认 `python3` 是 3.9，跑不动。请用 `python3.11` 或自己装 3.10+。

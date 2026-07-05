@@ -1,16 +1,16 @@
 ---
 name: xgkb-sync-helper
 description: "玄关知识库同步助手。Agent 写文件后调用 xgkb-push 自动同步到玄关个人知识库。支持文本和二进制文件、增删改同步、版本控制、云端↔本地双向同步。触发词：同步到知识库、xgkb-push、推送知识库、xgkb-sync、xgkb-pull、xgkb-versions"
-version: "2.0.0"
+version: "2.1.1"
 ---
 
 # xgkb-sync-helper — 玄关知识库同步助手
 
-> Agent 写本地文件后，一行命令同步到玄关个人知识库。v2.0 引入：删除/改名同步、版本控制、双向同步。
+> Agent 写本地文件后，一行命令同步到玄关个人知识库。v2.1 引入：SQLite 状态、删除/改名同步、版本控制、双向同步。
 
 ## 能力
 
-| 能力 | v0.1 | v2.0 |
+| 能力 | v0.1 | v2.1 |
 |---|---|---|
 | 上传/覆盖文件 | ✅ | ✅ |
 | 二进制文件（pdf/png/...）| ✅ | ✅ |
@@ -275,27 +275,23 @@ state_data = state.load_state(remote_root, server_url, app_key, proj_root)
 # 1. 看有哪些 JSON 要迁
 python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py list
 
-# 2. 先 dry-run
-python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py migrate --all --dry-run
+# 2. 先 dry-run（v2.1 需要项目根来生成 hash-key DB）
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py migrate --all --proj-root /path/to/project --dry-run
 
 # 3. 确认没问题，真跑
-python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py migrate --all
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py migrate --all --proj-root /path/to/project
 ```
 
 迁移行为：
-- 把 `<name>.json` → `<name>.db`（**仍用 old key 公式 = remoteRoot**，保证无缝衔接）
+- 默认写入 v2.1 hash-key DB，与 `load_state(remote_root, server_url, app_key, proj_root)` 一致
+- 如确需旧 key，显式加 `--legacy-key`（v2.1 常规调用不会自动读取 legacy DB）
 - 原 JSON 备份为 `<name>.json.v2-bak`
 - DB schema 含 `meta.schema_version` / `meta.migrated_at` / `meta.migrated_from` 三个标记字段
 
 **没 JSON（首次使用 v2.1）**：什么都不用做。首次 push 时 SQLite 会按新公式自动创建。
 
-### 迁移后享受新公式
-
-迁移后 DB 用旧 key（`remoteRoot`）以兼容。**享受跨项目隔离只需跑一次 sync**——下次 `xgkb_sync_full.py . --direction push` 会按新 hash key 创建新 DB，旧的会被废弃（不会自动删，保留作审计）。
-
 ### 没改的东西
 
-- `xgkb_client.py`：API 客户端没变
 - `xgkb_push.py` / `xgkb_sync_full.py` / `xgkb_versions.py`：外部行为不变，**只换了内部 state 后端**
 - `.xgkb.json` 配置格式：不变
 - `xgkb_retry.py` 的 `.xgkb-retry.jsonl`：单独文件，**没迁**（独立功能，未来再说）

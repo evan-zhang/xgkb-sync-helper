@@ -30,17 +30,18 @@ import xgkb_client as api
 import xgkb_state_sqlite as state
 
 DEFAULT_SERVER_URL = api.DEFAULT_SERVER_URL
+DEFAULT_REMOTE_ROOT = "OpenClaw"
 MAX_FILE_SIZE = api.MAX_FILE_SIZE
 
 
 # === 配置加载（保留旧 workspace 定位逻辑） ===
 
-def get_workspace(file_path: Path | None = None) -> Path:
+def get_workspace(file_path: str | Path | None = None) -> Path:
     ws = os.environ.get("OPENCLAW_WORKSPACE")
     if ws:
         return Path(ws)
     if file_path is not None:
-        current = file_path.resolve()
+        current = Path(file_path).resolve()
         if current.is_file():
             current = current.parent
         for parent in [current] + list(current.parents):
@@ -56,11 +57,11 @@ def get_workspace(file_path: Path | None = None) -> Path:
     return Path.home() / ".openclaw"
 
 
-def get_agent_config_path(file_path: Path | None = None) -> Path:
+def get_agent_config_path(file_path: str | Path | None = None) -> Path:
     return get_workspace(file_path) / ".xgkb.json"
 
 
-def get_retry_log_path(file_path: Path | None = None) -> Path:
+def get_retry_log_path(file_path: str | Path | None = None) -> Path:
     return get_workspace(file_path) / ".xgkb-retry.jsonl"
 
 
@@ -79,7 +80,7 @@ def find_project_config(start_path: Path):
     return None, None
 
 
-def load_global_config(file_path: Path | None = None) -> dict:
+def load_global_config(file_path: str | Path | None = None) -> dict:
     config: dict = {}
     cfg_path = get_agent_config_path(file_path)
     if cfg_path.exists():
@@ -93,6 +94,22 @@ def load_global_config(file_path: Path | None = None) -> dict:
     if not config.get("serverUrl"):
         config["serverUrl"] = os.environ.get("XGKB_SERVER_URL", DEFAULT_SERVER_URL)
     return config
+
+
+# Backward-compatible public names used by xgkb_retry.py / xgkb_sync_dir.py.
+def load_agent_config(file_path: str | Path | None = None) -> dict:
+    return load_global_config(file_path)
+
+
+def resolve_project_id(server_url: str, app_key: str, proj_cfg: dict) -> str:
+    return api.resolve_project_id(server_url, app_key, proj_cfg)
+
+
+def upload_content(server_url: str, app_key: str, project_id: str,
+                   folder_name: str, file_name: str, content: str, suffix: str) -> int:
+    return api.upload_content(
+        server_url, app_key, project_id, folder_name, file_name, content, suffix,
+    )
 
 
 # === 重试队列 ===
@@ -170,10 +187,15 @@ def push_file(file_path: str) -> None:
             version_name=version_name,
         )
 
-        # 更新 state
-        new_version = recorded.get("versionNumber", 0) + 1 if recorded and version_control else 1
-        if not version_control and recorded:
+        # 更新 state。版本控制开启时以云端真实版本号为准，避免本地猜测漂移。
+        if version_control:
+            new_version = api.get_last_version(
+                server_url, app_key, file_id,
+            ).get("versionNumber", recorded.get("versionNumber", 0) + 1 if recorded else 1)
+        elif recorded:
             new_version = recorded.get("versionNumber", 1)
+        else:
+            new_version = 1
         state.mark_synced(state_data, rel_path, file_id, new_version, path)
         state.save_state(state_data)
 

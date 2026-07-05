@@ -14,6 +14,7 @@ import os
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -46,7 +47,9 @@ def api_call(
 
     data = None
     if method == "GET" and body:
-        qs = "&".join(f"{k}={v}" for k, v in body.items() if v is not None)
+        qs = urllib.parse.urlencode(
+            {k: v for k, v in body.items() if v is not None}
+        )
         url = f"{url}?{qs}"
     elif method == "POST" and body:
         headers["Content-Type"] = "application/json"
@@ -553,6 +556,16 @@ def upload_local_file(
             server_url, app_key, str(local_path), file_name,
         )
         assert project_id is not None, "project_id required"
+        if update_file_id is not None:
+            return update_file_version(
+                server_url, app_key, update_file_id, resource_id,
+                version_status=2,
+                version_remark=version_remark,
+                version_name=version_name,
+                suffix=suffix,
+                size=size,
+                project_id=str(project_id),
+            )
         return save_file_by_path(
             server_url, app_key, str(project_id), folder_name,
             file_name, resource_id, suffix, size,

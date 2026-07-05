@@ -25,6 +25,7 @@ xgkb_sync_full.py — xgkb-sync-helper 全量双向同步
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -108,6 +109,17 @@ def compute_remote_path(remote_root: str, rel_path: str) -> str:
     if remote_root:
         return f"{remote_root}/{rel_path}"
     return rel_path
+
+
+def hash_text_content(content: str) -> str:
+    """Return the same sha256:... format used by state.hash_file()."""
+    h = hashlib.sha256()
+    h.update(content.encode("utf-8"))
+    return "sha256:" + h.hexdigest()
+
+
+def is_supported_pull_text(rel_path: str) -> bool:
+    return Path(rel_path).suffix.lower() in api.TEXT_EXTENSIONS
 
 
 # === Push 模式：本地 → 云端 ===
@@ -231,6 +243,7 @@ def do_pull(
     remote_root: str,
     state_data: dict,
     dry_run: bool = False,
+    conflict: str = "local",
 ) -> dict:
     """云端 → 本地（全量列举子树 → 对比 state）。
 
@@ -239,7 +252,6 @@ def do_pull(
 
     返回 {"downloaded": int, "created": int, "deleted": int, "skipped": int}
     """
-    result = {"downloaded": 0, "created": 0, "deleted": int, "skipped": 0}  # type: ignore
     result = {"downloaded": 0, "created": 0, "deleted": 0, "skipped": 0}
 
     # 1) 解析 remoteRoot 对应的 folderId
@@ -270,8 +282,10 @@ def do_pull(
 
     # 2) 递归列举文件夹下所有文件（DFS）
     cloud_files: dict = {}  # rel_path -> {fileId, name, type, parentPath}
+    walk_ok = True
 
     def walk(parent_id: int, path_prefix: str) -> None:
+        nonlocal walk_ok
         try:
             children = api.get_child_files(
                 server_url, app_key, parent_id,
@@ -280,6 +294,7 @@ def do_pull(
         except Exception as e:
             print(f"  ✗ 列举子项失败 (parent={parent_id}): {e}",
                   file=sys.stderr)
+            walk_ok = False
             return
 
         for item in children:
@@ -301,11 +316,21 @@ def do_pull(
                 }
 
     walk(folder_id, "")
+    if not walk_ok:
+        print("[xgkb-sync] 云端枚举不完整，跳过本轮 pull 以避免部分写入或误删",
+              file=sys.stderr)
+        result["skipped"] += 1
+        return result
 
     # 3) 对比 state，找出新增/更新/删除
     tracked = state.list_tracked_paths(state_data)
-    tracked_set = set(tracked)
     cloud_set = set(cloud_files.keys())
+
+    if tracked and not cloud_set:
+        print("[xgkb-sync] 云端列表为空但本地存在已跟踪文件，跳过本地批量删除",
+              file=sys.stderr)
+        result["skipped"] += len(tracked)
+        return result
 
     # 删除：state 有但云端没有（需要本地删）
     for rel_path in tracked:
@@ -316,7 +341,7 @@ def do_pull(
                 local_file = proj_root / rel_path
                 if local_file.exists():
                     local_file.unlink()
-            state.mark_deleted(state_data, rel_path)
+                state.mark_deleted(state_data, rel_path)
             result["deleted"] += 1
 
     # 创建/更新：云端有，本地没有或本地 hash 不同
@@ -324,6 +349,11 @@ def do_pull(
         meta = cloud_files[rel_path]
         file_id = meta["fileId"]
         local_path = proj_root / rel_path
+
+        if not is_supported_pull_text(rel_path):
+            print(f"  ! 跳过非文本文件拉取: {rel_path}", file=sys.stderr)
+            result["skipped"] += 1
+            continue
 
         # 拉内容
         try:
@@ -343,18 +373,30 @@ def do_pull(
                 pass
 
         recorded = state.get_recorded(state_data, rel_path)
-        cloud_hash = recorded.get("contentHash") if recorded else ""
+        recorded_hash = recorded.get("contentHash") if recorded else ""
+        cloud_hash = hash_text_content(content_str)
 
-        # 判断要不要更新（云端 hash 跟 state 中记录的 hash 不同 = 云端更新了）
-        # 简化：本地 hash != 云端记录的 hash → 更新
-        # 注意：我们没有云端文件 hash，只能依赖"本地 hash vs state hash"判断
-        # 这意味着：state 缺失 → 当作新增
         if is_new:
             action = "创建"
-        elif local_hash != cloud_hash:
+        elif recorded is None:
+            print(f"  ! 跳过未跟踪且本地已存在文件: {rel_path}", file=sys.stderr)
+            result["skipped"] += 1
+            continue
+        elif cloud_hash == recorded_hash:
+            action = None
+        elif local_hash == recorded_hash:
             action = "更新"
         else:
-            action = None  # 没变
+            if conflict == "cloud":
+                action = "更新"
+            elif conflict == "skip":
+                print(f"  ! 冲突跳过: {rel_path}", file=sys.stderr)
+                result["skipped"] += 1
+                continue
+            else:
+                print(f"  ! 冲突保留本地: {rel_path}", file=sys.stderr)
+                result["skipped"] += 1
+                continue
 
         if action is None:
             continue
@@ -367,8 +409,6 @@ def do_pull(
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_text(content_str, encoding="utf-8")
 
-        # 计算本地新 hash
-        new_hash = state.hash_file(local_path)
         # 记录到 state
         version_number = content_data.get("versionNumber", 1)
         state.mark_synced(state_data, rel_path, file_id, version_number, local_path)
@@ -449,7 +489,8 @@ def main() -> int:
               f"🗑️ 删除: {r['deleted']}  ⚠️ 跳过: {r['skipped']}")
     elif args.direction == "pull":
         r = do_pull(server_url, app_key, proj_cfg, proj_root, project_id,
-                    remote_root, state_data, dry_run=args.dry_run)
+                    remote_root, state_data, dry_run=args.dry_run,
+                    conflict=args.conflict)
         print()
         print(f"[xgkb-sync] 📥 拉取: {r['downloaded']}  ✨ 创建: {r['created']}  "
               f"🗑️ 删除: {r['deleted']}  ⚠️ 跳过: {r['skipped']}")
@@ -457,7 +498,8 @@ def main() -> int:
         # 先 pull 再 push
         print("--- pull ---")
         r1 = do_pull(server_url, app_key, proj_cfg, proj_root, project_id,
-                     remote_root, state_data, dry_run=args.dry_run)
+                     remote_root, state_data, dry_run=args.dry_run,
+                     conflict=args.conflict)
         print(f"  拉取: {r1['downloaded']}  创建: {r1['created']}  删除: {r1['deleted']}")
         print()
         print("--- push ---")

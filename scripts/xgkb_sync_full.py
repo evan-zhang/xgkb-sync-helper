@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 import xgkb_client as api
-import xgkb_state as state
+import xgkb_state_sqlite as state
 
 
 DEFAULT_SERVER_URL = api.DEFAULT_SERVER_URL
@@ -426,8 +426,7 @@ def main() -> int:
         return 1
 
     remote_root = proj_cfg.get("remoteRoot", "OpenClaw")
-    project_key = remote_root  # 用 remoteRoot 作为项目唯一标识
-    state_data = state.load_state(project_key)
+    state_data = state.load_state(remote_root, server_url, app_key, proj_root)
 
     # 解析 projectId
     try:

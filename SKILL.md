@@ -233,3 +233,69 @@ xgkb-sync-full <path> --direction push
 - v0.1 调用 `xgkb_push.py` 完全兼容
 - 新能力在 `xgkb_sync_full.py` / `xgkb_versions.py`
 - v0.1 的 `.xgkb.json` 配置完全兼容；加 `versionControl: true` 即开启版本控制
+
+## 升级路径（v2.0 → v2.1）—— state 从 JSON 迁到 SQLite
+
+### 为什么改
+
+v2.0 用 `~/.openclaw/xgkb-state/<remoteRoot>.json` 存同步状态。**两个已知风险**：
+
+1. **并发覆盖**：多 agent / 多设备同时 push，后写覆盖前写，state 错乱
+2. **跨项目撞名**：两个项目都用 `remoteRoot="foo"`，state 文件互相覆盖
+
+v2.1 用 SQLite（WAL + busy_timeout）解决并发；用 SHA256 key 公式解决跨项目撞名。
+
+### 新 key 公式
+
+```
+project_key = sha256(
+  "xgkb-state-v1|" + serverUrl + "|" + appKey + "|" + remoteRoot + "|" + abs_proj_root
+)
+```
+
+DB 文件名 = 前 32 hex 字符（`0d33bb3796b85eda734e8e154c2093eb.db`）。**不再能从文件名看出哪个项目**——这是有意的（防信息泄露 + 防撞名）。
+
+### API 变化（向后兼容）
+
+```python
+# v2.0 旧调用（仍可用，仅传 remote_root 时 key = remote_root）
+state_data = state.load_state(remote_root)
+
+# v2.1 推荐（传全 4 参时用 hash key）
+state_data = state.load_state(remote_root, server_url, app_key, proj_root)
+```
+
+所有调用方（`xgkb_push.py` / `xgkb_sync_full.py` / `xgkb_versions.py`）已自动切到新调用。
+
+### 从 v2.0 升级
+
+**你已经有 JSON state**：跑一次迁移（**手动，不自动**）：
+
+```bash
+# 1. 看有哪些 JSON 要迁
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py list
+
+# 2. 先 dry-run
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py migrate --all --dry-run
+
+# 3. 确认没问题，真跑
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py migrate --all
+```
+
+迁移行为：
+- 把 `<name>.json` → `<name>.db`（**仍用 old key 公式 = remoteRoot**，保证无缝衔接）
+- 原 JSON 备份为 `<name>.json.v2-bak`
+- DB schema 含 `meta.schema_version` / `meta.migrated_at` / `meta.migrated_from` 三个标记字段
+
+**没 JSON（首次使用 v2.1）**：什么都不用做。首次 push 时 SQLite 会按新公式自动创建。
+
+### 迁移后享受新公式
+
+迁移后 DB 用旧 key（`remoteRoot`）以兼容。**享受跨项目隔离只需跑一次 sync**——下次 `xgkb_sync_full.py . --direction push` 会按新 hash key 创建新 DB，旧的会被废弃（不会自动删，保留作审计）。
+
+### 没改的东西
+
+- `xgkb_client.py`：API 客户端没变
+- `xgkb_push.py` / `xgkb_sync_full.py` / `xgkb_versions.py`：外部行为不变，**只换了内部 state 后端**
+- `.xgkb.json` 配置格式：不变
+- `xgkb_retry.py` 的 `.xgkb-retry.jsonl`：单独文件，**没迁**（独立功能，未来再说）

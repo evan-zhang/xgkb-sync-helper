@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .xgkb.json
+*.v2-bak
+*.db
+*.db-wal
+*.db-shm

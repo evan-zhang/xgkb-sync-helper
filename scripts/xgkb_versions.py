@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 import xgkb_client as api
-import xgkb_state as state
+import xgkb_state_sqlite as state
 
 
 DEFAULT_SERVER_URL = api.DEFAULT_SERVER_URL
@@ -84,7 +84,7 @@ def cmd_list_local(server_url: str, app_key: str, local_path: Path) -> int:
         return 1
 
     remote_root = proj_cfg.get("remoteRoot", "OpenClaw")
-    state_data = state.load_state(remote_root)
+    state_data = state.load_state(remote_root, server_url, app_key, proj_root)
     rel_path = str(local_path.resolve().relative_to(proj_root)).replace(os.sep, "/")
     recorded = state.get_recorded(state_data, rel_path)
     if not recorded:
@@ -127,7 +127,7 @@ def cmd_tree(server_url: str, app_key: str, proj_root: Path) -> int:
         return 1
 
     remote_root = proj_cfg.get("remoteRoot", "OpenClaw")
-    state_data = state.load_state(remote_root)
+    state_data = state.load_state(remote_root, server_url, app_key, proj_root)
     tracked = state.list_tracked_paths(state_data)
 
     if not tracked:

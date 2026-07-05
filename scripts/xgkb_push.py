@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-xgkb_push.py — 单文件 push 入口（v0.2，内部用 xgkb_client + xgkb_state）
+xgkb_push.py — 单文件 push 入口（v2.1，内部用 xgkb_client + xgkb_state_sqlite）
 
 用法（向后兼容 v0.1）:
   python3 xgkb_push.py <文件路径>
@@ -27,7 +27,7 @@ from pathlib import Path
 
 # 复用新模块
 import xgkb_client as api
-import xgkb_state as state
+import xgkb_state_sqlite as state
 
 DEFAULT_SERVER_URL = api.DEFAULT_SERVER_URL
 MAX_FILE_SIZE = api.MAX_FILE_SIZE
@@ -148,7 +148,7 @@ def push_file(file_path: str) -> None:
                    if "/" in rel_path else remote_root)
 
     # 查询 state 看是否已同步过
-    state_data = state.load_state(remote_root)
+    state_data = state.load_state(remote_root, server_url, app_key, proj_root)
     recorded = state.get_recorded(state_data, rel_path)
     update_file_id = recorded["fileId"] if recorded else None
 

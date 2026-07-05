@@ -1,20 +1,35 @@
 ---
 name: xgkb-sync-helper
-description: "玄关知识库同步助手。Agent 写文件后调用 xgkb-push 自动同步到玄关个人知识库。支持文本和二进制文件、幂等覆盖、批量目录同步。触发词：同步到知识库、xgkb-push、推送知识库、xgkb-sync"
-version: "1.0.0"
+description: "玄关知识库同步助手。Agent 写文件后调用 xgkb-push 自动同步到玄关个人知识库。支持文本和二进制文件、增删改同步、版本控制、云端↔本地双向同步。触发词：同步到知识库、xgkb-push、推送知识库、xgkb-sync、xgkb-pull、xgkb-versions"
+version: "2.0.0"
 ---
 
 # xgkb-sync-helper — 玄关知识库同步助手
 
-> Agent 写本地文件后，一行命令同步到玄关个人知识库。
+> Agent 写本地文件后，一行命令同步到玄关个人知识库。v2.0 引入：删除/改名同步、版本控制、双向同步。
+
+## 能力
+
+| 能力 | v0.1 | v2.0 |
+|---|---|---|
+| 上传/覆盖文件 | ✅ | ✅ |
+| 二进制文件（pdf/png/...）| ✅ | ✅ |
+| **删除本地文件 → 云端同步删** | ❌ | ✅ |
+| **本地改名/移动 → 云端同步** | ❌ | ⚠️ 简化版：删除+新建（保版本历史不被云端改动） |
+| **版本控制**（云端多版本） | ❌ | ✅（需 `.xgkb.json` 启用 `versionControl: true`） |
+| **云端 → 本地 pull** | ❌ | ✅（多设备同步） |
+| **冲突策略**（sync 模式） | n/a | local-wins / cloud-wins / skip |
+| **本地状态缓存**（增量同步） | ❌ | ✅ `~/.openclaw/xgkb-state/` |
+| **dry-run 预览** | ✅ | ✅ |
+| **失败重试队列** | ✅ | ✅ |
 
 ## 机制
 
 **Fire-on-write**：Agent 执行 `write` / `edit` 后，调 `xgkb-push <文件路径>`，脚本自动完成上传/更新。
 
-- **幂等**：同名文件重复上传不创建副本，直接覆盖
+- **幂等**：同名文件重复上传不创建副本，直接覆盖（保留原 fileId）
 - **全类型**：文本文件（.md/.txt/.json 等）和二进制文件（.pdf/.docx/.png 等）均支持
-- **实时**：写完即推，无轮询延迟
+- **增量**：本地状态缓存 `~/.openclaw/xgkb-state/<project>.json` 记录每个文件的 fileId、versionNumber、contentHash；push 时自动检测增删改
 - **零进程依赖**：不需要常驻服务，调一次跑一次
 - **失败安全**：网络失败写重试队列，不阻断主流程
 
@@ -31,19 +46,23 @@ version: "1.0.0"
 }
 ```
 
-### 项目集合配置
+### 项目配置
 
-项目集合根目录（如 `projects/`）放一个 `.xgkb.json`，所有子项目共用：
+每个项目根目录放一个 `.xgkb.json`：
 
 ```json
 {
   "enabled": true,
-  "remoteRoot": "TPR-Framework"
+  "remoteRoot": "TPR-Framework",
+  "versionControl": false
 }
 ```
 
-- `enabled`：`false` 或文件不存在 → 跳过同步
-- `remoteRoot`：知识库中的根目录名，默认 `OpenClaw`
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | 必须 | `false` 或文件不存在 → 跳过同步 |
+| `remoteRoot` | str | `"OpenClaw"` | 知识库中的根目录名（必须与云端实际存在的文件夹名一致）|
+| `versionControl` | bool | `false` | `true` 时 push 每次都成新版本；否则覆盖（保留原 fileId） |
 
 ### 环境变量（备选）
 
@@ -52,23 +71,74 @@ version: "1.0.0"
 
 ## 使用
 
-### 同步单个文件
+### 单文件 push（最常用）
 
 ```bash
 python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_push.py /path/to/file.md
 ```
 
-### 批量同步目录
+写入 stdin 模式（兼容 v0.1）：
 
 ```bash
-# 同步整个目录
-python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_dir.py /path/to/directory
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_push.py \
+  --stdin --name "note.md" --folder "TPR-Framework/notes" < content.md
+```
 
-# 预览模式（不实际推送）
+### 全量双向同步（推荐）
+
+`xgkb_sync_full.py` 是 v2.0 新增的核心脚本：
+
+```bash
+# push 模式：本地 → 云端（增删改同步，最常用）
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_full.py /path/to/project --direction push
+
+# pull 模式：云端 → 本地（拉取云端变更）
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_full.py /path/to/project --direction pull
+
+# sync 模式：双向（先 pull 再 push）
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_full.py /path/to/project --direction sync --conflict local
+
+# dry-run 预览
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_full.py /path/to/project --direction push --dry-run
+```
+
+**冲突策略**（sync 模式用）：
+- `local`（默认）：本地覆盖云端
+- `cloud`：云端覆盖本地
+- `skip`：跳过冲突项
+
+输出示例：
+```
+[xgkb-sync] 项目: /path/to/proj  →  空间: 1764536926399946754/TPR-Framework/
+
+  + 新增: docs/readme.md (fileId=2073652431417360386)
+  ~ 更新: docs/data.json (fileId=2073652442913947650, v3)
+  - 删除: research/note-a.md (fileId=2073652452976082946)
+
+[xgkb-sync] 📤 新增: 1  📝 更新: 1  🗑️ 删除: 1  ⚠️ 跳过: 0
+```
+
+### 版本控制工具
+
+```bash
+# 列出某 fileId 的所有历史版本
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_versions.py list <fileId>
+
+# 通过本地文件路径查云端版本（依赖 xgkb-state 缓存的 fileId）
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_versions.py list-local /path/to/file.md
+
+# 列出项目下所有版本化文件的最新版本
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_versions.py tree /path/to/project
+
+# 定稿某版本（versionNumber=0 = 最新）
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_versions.py finalize <fileId> [--version N]
+```
+
+### 批量同步目录（保留的 v0.1 脚本）
+
+```bash
 python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_dir.py /path/to/directory --dry-run
-
-# 自定义间隔和文件类型
-python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_dir.py /path/to/directory --interval 5 --pattern "*.md,*.txt"
+python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_dir.py /path/to/directory --pattern "*.md,*.txt"
 ```
 
 ### Agent exec 调用
@@ -76,23 +146,30 @@ python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_dir.py /path/to/di
 Skill 写完文件后追加：
 
 ```bash
+# 单文件
 python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_push.py <刚写的文件路径>
+
+# 项目级（推荐：自动检测增删改）
+python3.11 ~/.openclaw/skills/xgkb-sync-helper/scripts/xgkb_sync_full.py <项目根> --direction push
 ```
 
 ## 执行流程
 
 ```
-xgkb-push(file_path)
+xgkb-sync-full <path> --direction push
   1. 读全局配置 ~/.openclaw/xgkb.json → appKey + serverUrl
-  2. 向上找最近的 .xgkb.json → remoteRoot + enabled
-  3. enabled=false 或无配置 → 静默退出 (exit 0)
-  4. 获取/缓存 projectId（个人空间）
-  5. 计算远端路径：remoteRoot/文件相对路径
-  6. 按扩展名分流：
-     - 文本 → uploadContent（幂等覆盖）
-     - 二进制 → uploadWholeFile + saveFileByPath(nameConflictStrategy=1)（幂等覆盖）
-  7. 成功 → exit 0
-  8. 失败 → 写入重试队列，exit 0（不阻断主流程）
+  2. 向上找最近的 .xgkb.json → remoteRoot + enabled + versionControl
+  3. enabled=false → 静默退出 (exit 0)
+  4. 加载项目状态 ~/.openclaw/xgkb-state/<project>.json
+  5. 递归扫描本地目录（排除 .git/、.xgkb.json 等）
+  6. 对每个本地文件：
+     a. 算 contentHash (sha256)
+     b. 与 state 中记录的 hash 比对
+     c. 新增 → uploadContent / saveFileByPath
+     d. 修改 → uploadContent (updateFileId) 走版本更新或覆盖
+     e. 记入 state
+  7. 对 state 中存在但本地不存在的 → deleteFile（逻辑删除）
+  8. 持久化 state
 ```
 
 ## 重试
@@ -100,17 +177,59 @@ xgkb-push(file_path)
 - 失败记录写入 `~/.openclaw/xgkb-retry.jsonl`（JSONL 格式）
 - 调 `xgkb_retry.py` 消费队列，最多重试 3 次
 
-## API 参考
+## 本地状态缓存
 
-| 接口 | 用途 |
-|------|------|
-| `GET /document-database/project/personal/getProjectId` | 获取个人空间 ID |
-| `POST /document-database/file/uploadContent` | 上传/更新文本文件（幂等） |
-| `POST /cwork-file/uploadWholeFile` | 上传二进制物理文件 |
-| `POST /document-database/file/saveFileByPath` | 绑定到知识库目录（nameConflictStrategy=1 幂等） |
+`~/.openclaw/xgkb-state/<projectKey>.json` 结构：
+
+```json
+{
+  "projectKey": "TPR-Framework",
+  "remoteRoot": "TPR-Framework",
+  "projectId": "1764536926399946754",
+  "serverTime": 1714972812345,
+  "files": {
+    "docs/readme.md": {
+      "fileId": 2073652431417360386,
+      "versionNumber": 3,
+      "contentHash": "sha256:2b627b...",
+      "mtime": 1783232140,
+      "lastSyncAt": 1783232244
+    }
+  }
+}
+```
+
+**重要**：删除这个文件 = 强制重新全量同步（state 缺失时 push 会当本地文件全是新的）。
+
+## API 参考（共 13 个）
+
+| 文档 | 接口 | 用途 |
+|---|---|---|
+| 1.1 | `getProjectId` | 获取个人空间 ID |
+| 1.5 | `getChildFiles` | 列举子目录/文件（pull 用） |
+| 1.12 | `deleteFile` | 删除文件（逻辑/物理）|
+| 1.13a | `updateFileName` | 同目录改名 |
+| 1.13b | `moveFile` | 移动节点 |
+| 1.14 | `resolvePath` | 路径→fileId（pull 用） |
+| 1.17 | `getFileBasicInfo` | 获取文件基本信息 |
+| 2.3 | `saveFileByPath` | 绑定物理资源到项目目录 |
+| 2.4 | `updateFileVersion` | 上传新版本（versionStatus=2/3）|
+| 2.5 | `getVersionList` | 列历史版本 |
+| 2.6 | `getLastVersion` | 取最新版本 |
+| 2.7 | `finalizeVersion` | 定稿版本 |
+| 3.1 | `uploadContent` | 一键存文本（支持 updateFileId 版本模式）|
+| 3.2 | `getFullFileContent` | 拉取全文（pull 用）|
+
+详细规范见 `xgjk/dev-guide`（私有）：`02.产品业务AI文档/知识库/API接口明细_v2/`。
 
 ## 限制
 
 - 单文件大小限制 10MB
-- 不支持删除同步 — 知识库文件管理在玄关网页端操作
+- rename/move 当前简化处理：检测为「删除+新建」（保版本历史不会被云端改动；如需云端 rename，用 `updateFileName` API 直接调）
 - **Python 版本：必须 3.10+**（脚本用了 PEP 604 `str | Path` 语法）。Debian 默认 `python3` 是 3.9，跑不动。请用 `python3.11` 或自己装 3.10+。
+
+## 升级路径（v0.1 → v2.0）
+
+- v0.1 调用 `xgkb_push.py` 完全兼容
+- 新能力在 `xgkb_sync_full.py` / `xgkb_versions.py`
+- v0.1 的 `.xgkb.json` 配置完全兼容；加 `versionControl: true` 即开启版本控制

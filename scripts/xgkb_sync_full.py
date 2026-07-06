@@ -122,6 +122,104 @@ def is_supported_pull_text(rel_path: str) -> bool:
     return Path(rel_path).suffix.lower() in api.TEXT_EXTENSIONS
 
 
+# === v2.2 新增：retry queue 处理 ===
+
+def process_retry_queue(
+    server_url: str,
+    app_key: str,
+    proj_cfg: dict,
+    project_id: str,
+    remote_root: str,
+    state_data: dict,
+    max_passes: int = 3,
+    sleep_between_passes: float = 5.0,
+) -> dict:
+    """处理 retry_queue 里到期的项。
+
+    对每个 due 项，按 op 重试（create/update/delete）。
+    成功：mark_retry_done（删队列）。
+    失败：mark_retry_failed（增 attempts + 指数 backoff）。
+
+    最多跑 max_passes 轮，每轮间 sleep。
+    返回 {"retried": int, "still_failing": int}。
+    """
+    version_control = proj_cfg.get("versionControl", False)
+    retried = 0
+    still_failing = 0
+    for pass_n in range(1, max_passes + 1):
+        due = state.list_due_retries(state_data)
+        if not due:
+            if pass_n == 1:
+                print("[xgkb-sync] (retry 队列为空)")
+            break
+        print(f"[xgkb-sync] (retry 第 {pass_n}/{max_passes} 轮：{len(due)} 项)")
+        for item in due:
+            rel_path = item["rel_path"]
+            op = item["op"]
+            payload = item["payload"]
+            retry_id = item["id"]
+            try:
+                if op == "create":
+                    folder = payload.get("folder", remote_root)
+                    local_path = Path(payload["local_path"])
+                    file_id = api.upload_local_file(
+                        server_url, app_key, project_id, folder, local_path,
+                    )
+                    version_number = 1
+                    if version_control:
+                        version_number = api.get_last_version(
+                            server_url, app_key, file_id,
+                        ).get("versionNumber", 1)
+                    state.mark_synced(state_data, rel_path, file_id, version_number, local_path)
+                    print(f"    ✓ retry create: {rel_path} (fileId={file_id})")
+                elif op == "update":
+                    folder = payload.get("folder", remote_root)
+                    local_path = Path(payload["local_path"])
+                    update_file_id = payload["update_file_id"]
+                    if version_control:
+                        file_id = api.upload_local_file(
+                            server_url, app_key, project_id, folder, local_path,
+                            update_file_id=update_file_id,
+                            version_remark=f"retry {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                        )
+                        version_number = api.get_last_version(
+                            server_url, app_key, file_id,
+                        ).get("versionNumber", 1)
+                    else:
+                        file_id = api.upload_local_file(
+                            server_url, app_key, project_id, folder, local_path,
+                            update_file_id=update_file_id,
+                        )
+                        version_number = 1
+                    state.mark_synced(state_data, rel_path, file_id, version_number, local_path)
+                    print(f"    ✓ retry update: {rel_path} (fileId={file_id})")
+                elif op == "delete":
+                    file_id = payload["file_id"]
+                    api.delete_file(server_url, app_key, file_id, is_physical=False)
+                    state.mark_deleted(state_data, rel_path)
+                    print(f"    ✓ retry delete: {rel_path} (fileId={file_id})")
+                else:
+                    print(f"    ? retry 未知 op={op}: {rel_path}（跳）")
+                    state.mark_retry_failed(state_data, retry_id,
+                                             error=f"unknown op: {op}")
+                    continue
+                state.mark_retry_done(state_data, retry_id)
+                retried += 1
+            except Exception as e:
+                err_msg = str(e)
+                still = state.mark_retry_failed(state_data, retry_id, err_msg)
+                if still:
+                    print(f"    ✗ retry {op} 仍失败: {rel_path}: {e}", file=sys.stderr)
+                    still_failing += 1
+                else:
+                    print(f"    ✗ retry {op} 已超 max_attempts 丢弃: {rel_path}: {e}",
+                          file=sys.stderr)
+                    still_failing += 1
+        if pass_n < max_passes:
+            time.sleep(sleep_between_passes)
+    return {"retried": retried, "still_failing": still_failing}
+
+
 # === Push 模式：本地 → 云端 ===
 
 def do_push(
@@ -138,19 +236,29 @@ def do_push(
 
     返回 {"uploaded": int, "updated": int, "deleted": int, "renamed": int, "skipped": int}
     """
-    result = {"uploaded": 0, "updated": 0, "deleted": 0, "renamed": 0, "skipped": 0}
+    result = {"uploaded": 0, "updated": 0, "deleted": 0, "renamed": 0, "skipped": 0,
+              "skipped_empty": 0, "queued_retry": 0}
     local_files = collect_local_files(proj_root)
     tracked = state.list_tracked_paths(state_data)
     tracked_set = set(tracked)
 
+    version_control = proj_cfg.get("versionControl", False)
+
     # 1) 增 / 改
     for rel_path, local_path in sorted(local_files.items()):
+        # v2.2 改进：空文件提前跳过（玄端 API 拒绝空内容 code=401）
+        try:
+            if local_path.stat().st_size == 0:
+                print(f"  ⊘ 空文件跳过: {rel_path}", file=sys.stderr)
+                result["skipped_empty"] += 1
+                continue
+        except OSError:
+            pass
+
         local_hash = state.hash_file(local_path)
         recorded = state.get_recorded(state_data, rel_path)
         folder_name = compute_remote_path(remote_root, rel_path.rsplit("/", 1)[0]) \
             if "/" in rel_path else remote_root
-
-        version_control = proj_cfg.get("versionControl", False)
 
         if recorded is None:
             # 新增
@@ -172,8 +280,20 @@ def do_push(
                 print(f"  + 新增: {rel_path} (fileId={file_id})")
                 result["uploaded"] += 1
             except Exception as e:
-                print(f"  ✗ 新增失败: {rel_path}: {e}", file=sys.stderr)
-                result["skipped"] += 1
+                err_msg = str(e)
+                # v2.2：失败入 retry_queue + 指数 backoff
+                # 空内容错误（code=401 文件内容不能为空）不入队，永久跳过
+                if "文件内容不能为空" in err_msg or "content不能为空" in err_msg:
+                    print(f"  ✗ 新增失败: {rel_path}: 内容为空，已跳过（不入队列）", file=sys.stderr)
+                    result["skipped"] += 1
+                else:
+                    state.enqueue_retry(state_data, rel_path, "create",
+                                        payload={"folder": folder_name,
+                                                 "local_path": str(local_path)},
+                                        error=err_msg)
+                    print(f"  ✗ 新增失败: {rel_path}: {e}（已入重试队列）", file=sys.stderr)
+                    result["skipped"] += 1
+                    result["queued_retry"] += 1
         elif recorded.get("contentHash") != local_hash:
             # 改了
             if dry_run:
@@ -205,8 +325,19 @@ def do_push(
                 print(f"  ~ 更新: {rel_path} (fileId={file_id}, v{version_number})")
                 result["updated"] += 1
             except Exception as e:
-                print(f"  ✗ 更新失败: {rel_path}: {e}", file=sys.stderr)
-                result["skipped"] += 1
+                err_msg = str(e)
+                if "文件内容不能为空" in err_msg or "content不能为空" in err_msg:
+                    print(f"  ✗ 更新失败: {rel_path}: 内容为空，已跳过（不入队列）", file=sys.stderr)
+                    result["skipped"] += 1
+                else:
+                    state.enqueue_retry(state_data, rel_path, "update",
+                                        payload={"folder": folder_name,
+                                                 "local_path": str(local_path),
+                                                 "update_file_id": update_file_id},
+                                        error=err_msg)
+                    print(f"  ✗ 更新失败: {rel_path}: {e}（已入重试队列）", file=sys.stderr)
+                    result["skipped"] += 1
+                    result["queued_retry"] += 1
         # else: 内容没变，跳过
 
     # 2) 删（云端有、本地没了）
@@ -226,8 +357,13 @@ def do_push(
                 print(f"  - 删除: {rel_path} (fileId={file_id})")
                 result["deleted"] += 1
             except Exception as e:
-                print(f"  ✗ 删除失败: {rel_path}: {e}", file=sys.stderr)
+                err_msg = str(e)
+                state.enqueue_retry(state_data, rel_path, "delete",
+                                    payload={"file_id": file_id},
+                                    error=err_msg)
+                print(f"  ✗ 删除失败: {rel_path}: {e}（已入重试队列）", file=sys.stderr)
                 result["skipped"] += 1
+                result["queued_retry"] += 1
 
     return result
 
@@ -485,8 +621,21 @@ def main() -> int:
         r = do_push(server_url, app_key, proj_cfg, proj_root, project_id,
                     remote_root, state_data, dry_run=args.dry_run)
         print()
+        # v2.2 新增：自动处理 retry_queue 中的 due 项（指数 backoff 后到期）
+        r_retry = {"retried": 0, "still_failing": 0}
+        if not args.dry_run and r.get("queued_retry", 0) > 0:
+            print("[xgkb-sync] --- retry queue ---")
+            r_retry = process_retry_queue(server_url, app_key, proj_cfg,
+                                          project_id, remote_root,
+                                          state_data, max_passes=3)
+        # 队列总数
+        total_queue = state.count_retries(state_data) if not args.dry_run else 0
         print(f"[xgkb-sync] 📤 新增: {r['uploaded']}  📝 更新: {r['updated']}  "
-              f"🗑️ 删除: {r['deleted']}  ⚠️ 跳过: {r['skipped']}")
+              f"🗑️ 删除: {r['deleted']}  ⚠️ 跳过: {r['skipped']}  "
+              f"⊘ 空文件: {r.get('skipped_empty', 0)}")
+        if not args.dry_run:
+            print(f"[xgkb-sync] 🔁 重试: {r_retry['retried']} ok / "
+                  f"{r_retry['still_failing']} 仍失败（队列剩余 {total_queue}）")
     elif args.direction == "pull":
         r = do_pull(server_url, app_key, proj_cfg, proj_root, project_id,
                     remote_root, state_data, dry_run=args.dry_run,

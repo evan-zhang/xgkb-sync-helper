@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import json
 import os
 import sqlite3
 import sys
@@ -267,6 +268,118 @@ def get_recorded(state: dict, rel_path: str) -> Optional[dict]:
 def list_tracked_paths(state: dict) -> list[str]:
     '''列出所有已同步过的文件路径。'''
     return list(state['files'].keys())
+
+
+# === retry_queue API（v2.2 新增） ===
+
+def enqueue_retry(
+    state: dict,
+    rel_path: str,
+    op: str,
+    payload: Optional[dict] = None,
+    error: str = '',
+    backoff_seconds: int = 30,
+) -> None:
+    '''把失败的操作加入 retry_queue。
+
+    state: load_state() 返回的 dict（带 _db_project_key）
+    op: 'create' | 'update' | 'delete'
+    payload: 失败时携带的信息（如 fileId、updateFileId）
+    error: 上次失败的错误消息
+    backoff_seconds: 多久后可重试（默认 30 秒）
+    '''
+    project_key = state['_db_project_key']
+    conn = _get_conn(project_key)
+    now = int(time.time())
+    payload_json = json.dumps(payload or {}, ensure_ascii=False)
+    with _atomic(conn):
+        conn.execute(
+            '''INSERT INTO retry_queue
+               (rel_path, op, payload, attempts, last_error, next_retry_at, created_at)
+               VALUES (?, ?, ?, 0, ?, ?, ?)''',
+            (rel_path, op, payload_json, error, now + backoff_seconds, now),
+        )
+
+
+def list_due_retries(state: dict, now: Optional[int] = None) -> list[dict]:
+    '''列出到期的可重试项（next_retry_at <= now，按 id 排序）。
+
+    返回 [{id, rel_path, op, payload, attempts, last_error, next_retry_at}]。
+    '''
+    project_key = state['_db_project_key']
+    conn = _get_conn(project_key)
+    cur = conn.execute(
+        '''SELECT id, rel_path, op, payload, attempts, last_error, next_retry_at
+           FROM retry_queue
+           WHERE next_retry_at <= ?
+           ORDER BY id ASC''',
+        (now if now is not None else int(time.time()),),
+    )
+    rows = cur.fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            'id': r[0],
+            'rel_path': r[1],
+            'op': r[2],
+            'payload': json.loads(r[3]) if r[3] else {},
+            'attempts': r[4],
+            'last_error': r[5],
+            'next_retry_at': r[6],
+        })
+    return out
+
+
+def mark_retry_done(state: dict, retry_id: int) -> None:
+    '''重试成功后从队列删除。'''
+    project_key = state['_db_project_key']
+    conn = _get_conn(project_key)
+    with _atomic(conn):
+        conn.execute('DELETE FROM retry_queue WHERE id = ?', (retry_id,))
+
+
+def mark_retry_failed(
+    state: dict,
+    retry_id: int,
+    error: str,
+    attempts: Optional[int] = None,
+    max_attempts: int = 5,
+    backoff_seconds: Optional[int] = None,
+) -> bool:
+    '''重试再次失败：增加 attempts，更新 last_error 和 next_retry_at。
+
+    返回 True 表示仍在队列（未超过 max_attempts），False 表示已被丢弃。
+    backoff_seconds 默认按 attempts 指数退避：30 * 2^(attempts-1)。
+    '''
+    project_key = state['_db_project_key']
+    conn = _get_conn(project_key)
+    if attempts is None:
+        cur = conn.execute('SELECT attempts FROM retry_queue WHERE id = ?', (retry_id,))
+        row = cur.fetchone()
+        attempts = (row[0] if row else 0) + 1
+    if attempts > max_attempts:
+        with _atomic(conn):
+            conn.execute('DELETE FROM retry_queue WHERE id = ?', (retry_id,))
+        return False
+    if backoff_seconds is None:
+        backoff_seconds = min(30 * (2 ** max(0, attempts - 1)), 600)
+    next_at = int(time.time()) + backoff_seconds
+    with _atomic(conn):
+        conn.execute(
+            '''UPDATE retry_queue
+               SET attempts = ?, last_error = ?, next_retry_at = ?
+               WHERE id = ?''',
+            (attempts, error, next_at, retry_id),
+        )
+    return True
+
+
+def count_retries(state: dict) -> int:
+    '''队列里还有多少项（任意状态）。'''
+    project_key = state['_db_project_key']
+    conn = _get_conn(project_key)
+    cur = conn.execute('SELECT COUNT(*) FROM retry_queue')
+    return cur.fetchone()[0]
 
 
 class _atomic:

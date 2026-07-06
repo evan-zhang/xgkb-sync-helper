@@ -6,15 +6,17 @@ version: "2.1.1"
 
 # xgkb-sync-helper — 玄关知识库同步助手
 
-> Agent 写本地文件后，一行命令同步到玄关个人知识库。v2.1 引入：SQLite 状态、删除/改名同步、版本控制、双向同步。
+> Agent 写本地文件后，一行命令同步到玄关个人知识库。v2.2 引入：**空文件自动跳过**、**retry_queue 自动消费**（指数 backoff）、**payload 化失败恢复**。v2.1 引入：SQLite 状态、删除/改名同步、版本控制、双向同步。
 
 ## 能力
 
-| 能力 | v0.1 | v2.1 |
-|---|---|---|
-| 上传/覆盖文件 | ✅ | ✅ |
-| 二进制文件（pdf/png/...）| ✅ | ✅ |
-| **删除本地文件 → 云端同步删** | ❌ | ✅ |
+| 能力 | v0.1 | v2.1 | v2.2 |
+|---|---|---|---|
+| 上传/覆盖文件 | ✅ | ✅ | ✅ |
+| 删除/改名同步 | ❌ | ✅ | ✅ |
+| **空文件自动跳过**（玄端拒空内容） | ❌ | ❌ | ✅ `⊘ 空文件跳过` |
+| **retry_queue 自动消费**（指数 backoff） | ❌ | ❌ | ✅ 失败入队 + main 末尾自动 retry |
+| **本地状态缓存**（增量同步） | ❌ | ✅ `~/.openclaw/xgkb-state/` | ✅ |
 | **本地改名/移动 → 云端同步** | ❌ | ⚠️ 简化版：删除+新建（保版本历史不被云端改动） |
 | **版本控制**（云端多版本） | ❌ | ✅（需 `.xgkb.json` 启用 `versionControl: true`） |
 | **云端 → 本地 pull** | ❌ | ✅（多设备同步） |
@@ -182,10 +184,32 @@ xgkb-sync-full <path> --direction push
   8. 持久化 state
 ```
 
-## 重试
+## 重试（v2.2 新设计）
 
-- 失败记录写入 `~/.openclaw/xgkb-retry.jsonl`（JSONL 格式）
-- 调 `xgkb_retry.py` 消费队列，最多重试 3 次
+v2.1 时代失败只 print + 不入队。v2.2 引入 SQLite `retry_queue` 表，自动消费。
+
+- **失败入队**：API 调用失败（非"空内容"错误）→ `enqueue_retry()` 写入 `retry_queue` 表，带 op（create/update/delete）+ payload（folder/local_path/file_id）。
+- **自动消费**：push 完成后 main 自动调 `process_retry_queue()`，最多 3 轮，每轮间 sleep 5 秒。
+- **指数 backoff**：`mark_retry_failed()` 增 attempts，按 `30 * 2^(attempts-1)` 退避（30s/60s/120s/240s/600s）。
+- **最多 5 次**：attempts > 5 自动从队列丢弃。
+- **空内容错误不入队**：玄端 `code=401 文件内容不能为空` 是永久错误，永久跳过。
+- **手工查询**：
+
+  ```bash
+  sqlite3 ~/.openclaw/xgkb-state/<projectKey>.db \
+    "SELECT id, rel_path, op, attempts, last_error, datetime(next_retry_at,'unixepoch')
+     FROM retry_queue ORDER BY id"
+  ```
+
+- **输出示例**：
+
+  ```
+  [xgkb-sync] --- retry queue ---
+  [xgkb-sync] (retry 第 1/3 轮：5 项)
+      ✓ retry create: 202508/ai-research/foo.html (fileId=2073804999000000000)
+      ✗ retry create 仍失败: 202508/ai-research/bar.html: 服务器繁忙（已入重试队列）
+  [xgkb-sync] 🔁 重试: 4 ok / 1 仍失败（队列剩余 1）
+  ```
 
 ## 本地状态缓存
 
@@ -305,3 +329,33 @@ python3 ~/.openclaw/skills/xgkb-sync-helper/scripts/migrate_json_to_sqlite.py mi
 - `xgkb_push.py` / `xgkb_sync_full.py` / `xgkb_versions.py`：外部行为不变，**只换了内部 state 后端**
 - `.xgkb.json` 配置格式：不变
 - `xgkb_retry.py` 的 `.xgkb-retry.jsonl`：单独文件，**没迁**（独立功能，未来再说）
+
+## 升级路径（v2.1 → v2.2）—— retry_queue + 空文件跳过
+
+### 为什么改
+
+v2.1 的 push 失败**只 print 不入队**，导致：
+1. 限流（`服务器繁忙`）失败需要手工用 `xgkb_retry_failed.py` 重跑
+2. 空文件（`__init__.py` 等 0 字节）每次都重试，浪费 API 配额
+3. 失败上下文丢失（没有 fileId/folder 信息），重传需要重新拼
+
+v2.2 引入 SQLite `retry_queue` 表 + payload 持久化 + 指数 backoff，把"失败管理"从代码里挪到 state 里。
+
+### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `xgkb_state_sqlite.py` | 加 `enqueue_retry` / `list_due_retries` / `mark_retry_done` / `mark_retry_failed` / `count_retries` 5 个函数 |
+| `xgkb_sync_full.py` | push 时：①空文件自动跳过 ②失败入队（空内容错误除外） ③main 末尾自动 `process_retry_queue()` |
+| `SKILL.md` | 本节 |
+
+### 从 v2.1 升级
+
+**什么都不用做**——DB schema 升级是**前向兼容**的：`retry_queue` 表已存在于 v2.1 的初始化 SQL 里（之前没 API 调用，现在加了 API）。升级后首次 push：
+- 老失败会自动入队（如果你用 v2.1 时的过程出问题但还没重试，手工 `enqueue_retry` 一下即可）
+- 接下来自动消费
+
+### 没改的东西
+
+- `.xgkb.json` 配置格式：不变
+- `xgkb_retry_failed.py`：仍可用，作为手工补传脚本（如果你想跳过 backoff 直接重传）
